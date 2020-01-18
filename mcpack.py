@@ -1,136 +1,195 @@
 #!/usr/bin/python3
-# McPack
+# MCPack
 
-from utils import *; logstart('McPack')
+from utils.nolog import *
 
-mc_version = None
-db.setfile('./.mcpack')
-db.setbackup(False)
-db.setnolog(True)
-db.register('mc_version')
+def print_state(c, t): print(f"\033[1;9{c}m==>\033[0m \033[1m{t}\033[0m")
+def print_info(c, t): print(f"   \033[1;9{c}m>\033[0m \033[1m{t}\033[0m")
 
-class CurseForge:
-	cfbaseurl = "https://minecraft.curseforge.com"
+class TwitchAddonAPI:
+	api_base_url = "https://addons-ecs.forgesvc.net/api/v2/addon"
+	api_headers = {'User-Agent': None}
 
-	def url(spec): return lambda f: lambda self, *args, **kwargs: f(self, bs4.BeautifulSoup(requests.get(f"{self.cfbaseurl}/{spec.format(*args)}").text, 'html.parser'), **kwargs)
+	@classmethod
+	@cachedfunction
+	def api_get(cls, path, **kwargs): return S(requests.get(cls.api_base_url+path, headers=cls.api_headers, params=kwargs).json())
 
-	@staticmethod
-	def _get_listing(l):
-		return [{'name': re.search(r'.*/(.+?)/?$', i.find(class_='name-wrapper').a['href'])[1], 'title': i.find(class_='name-wrapper').text.strip(), 'desc': i.find(class_='description').text.strip()} for i in l.findAll(class_='details') if not i.find(class_='no-results')]
+	def search(self, name):
+		return self.api_get('/search', gameId=432, searchFilter=name)@{'categorySection': lambda x: x['id'] == 8}
 
-	@url("/mc-mods?page={0}")
-	def mcmods(self, p):
-		return self._get_listing(p.findAll(class_='listing')[1])
+	def getAddon(self, addonId):
+		return self.api_get(f"/{addonId}")
 
-	@url("/projects/{0}")
-	def project(self, p):
-		return {'name': p.find(class_='project-title').text.strip(), 'desc': p.find(class_='project-description').text.strip()}
+	def getAddonFiles(self, addonId):
+		return self.api_get(f"/{addonId}/files")
 
-	@url("/projects/{0}/relations/dependencies?filter-related-dependencies=3")
-	def dependencies(self, p):
-		return self._get_listing(p.find(class_='listing'))
+	def getAddonFileInfo(self, addonId, fileId):
+		return self.api_get(f"/{addonId}/file/{fileId}")
 
-	@url("/projects/{0}/files")
-	def project_versions(self, p):
-		return {i.text.strip(): i['value'] for i in p.find(id='filter-game-version').findAll('option')}
+class MCPack(metaclass=SlotsMeta):
+	mc_version: None
+	mod_list: list
+	default_filename = 'mcpack.json'
 
-	@url("/projects/{0}/files?filter-game-version={1}")
-	def project_newest_file_id(self, p, version='', min_type='A'): # TODO: support pagination, optimize type checking
-		return next(filter(lambda x: x.div['title'] in (('Alpha', 'Beta', 'Release') if (min_type == 'A') else ('Beta', 'Release') if (min_type in 'AB') else ('Release',)), p.findAll(class_='project-file-list-item'))).find(class_='project-file-name-container').a['href'].split('/')[-1]
-
-	@url("/projects/{0}/files/{1}")
-	def project_file_id_md5(self, p):
-		return p.find(class_='md5').text.strip()
-
-	def resolve_deps(self, name, r=None): # TODO: conflicts, optionals?; optimize (listing)?
-		if (r is None): r = set()
-		for i in S(self.dependencies(name))@['name']:
-			r.add(i)
-			self.resolve_deps(i, r)
+	@classmethod
+	def open(cls, file=None):
+		if (file is None): file = cls.default_filename
+		r = cls()
+		if (isinstance(file, str)):
+			if (not os.path.isfile(file)): return r
+			file = open(file, 'r')
+		for k, v in json.load(file).items():
+			setattr(r, k, v)
 		return r
 
-def install(cargs): # TODO: more error messages
-	db.load()
-	if (not mc_version): exit("Set Minecraft version with `mcpack version` first.")
-	cf = CurseForge()
+	def save(self, file=None):
+		if (file is None): file = self.default_filename
+		json.dump({i: getattr(self, i) for i in self.__slots__}, open(file, 'w') if (isinstance(file, str)) else file)
+
+@apcmd(metavar='<action>')
+@aparg('name')
+def add(cargs):
+	""" Add a mod to the bundle. """
+
+	mcpack = MCPack.open()
+
+	cf = TwitchAddonAPI()
+
+	res = cf.search(cargs.name)
+	l = sorted(res, key=lambda x: (x['slug'] != cargs.name, -x['popularityScore'], x['name']))
+	w = os.get_terminal_size()[0]
+	for ii, i in enumerate(l, 1):
+		s = f"\033[7;33m{ii}\033[0m \033[1m{i['name']}\033[0m \033[2mby {i['authors'][0]['name']}\033[0m "
+		print(s + f"\033[1;34m({S(', ').join(S(i['categories'])@['name']).wrap(w-1, loff=len(noesc.sub('', s))+1)})\033[0m" + ' \033[1;33;7m[added]\033[0m'*(i['id'] in mcpack.mod_list))
+		print(' '*(len(Sint(ii))+3) + S(i['summary']).wrap(w, loff=len(Sint(ii))+4))
+
+	s = "Select mods to add (e.g. 1 2 3-5)"
+	print_state(3, s)
+	print_state(3, '-'*len(s))
+	sel = [j for i in re.findall(r'(\d+)(?:-(\d+))?', input('\1\033[1;93m\2==>\1\033[0m\2 ')) for j in (range(int(i[0]), int(i[1])+1) if (i[1]) else (int(i[0]),))]
+	mods = [l[i-1]['id'] for i in sel]
+
+	nadded = len(set(mods) - set(mcpack.mod_list))
+	mcpack.mod_list += mods
+	mcpack.mod_list = S(mcpack.mod_list).uniquize()
+	mcpack.save()
+
+	print_state(2, f"Added {decline(nadded, ('new mod', 'new mods'))}.")
+
+@apcmd(metavar='<action>')
+def list(cargs):
+	""" List mods in bundle. """
+
+	mcpack = MCPack.open()
+
+	cf = TwitchAddonAPI()
+
+	l = mcpack.mod_list
+	w = os.get_terminal_size()[0]
+	for ii, i in enumerate(l, 1):
+		i = cf.getAddon(i)
+		s = f"\033[1m• {i['name']}\033[0m \033[2mby {i['authors'][0]['name']}\033[0m "
+		print(s + f"\033[1;94m({S(', ').join(S(i['categories'])@['name']).wrap(w-1, loff=len(noesc.sub('', s))+1)})\033[0m")
+		print(' '*3 + S(i['summary']).wrap(w, loff=4))
+
+@apcmd(metavar='<action>')
+#@aparg('--beta', action='store_true', help="Allow beta versions")
+#@aparg('--alpha', action='store_true', help="Allow alpha and beta versions")
+def update(cargs):
+	""" Download/update all mods in the bundle along with their dependencies. """
+
+	mcpack = MCPack.open()
+
+	if (not mcpack.mc_version): exit("Set Minecraft version with `mcpack version' first.")
+
+	cf = TwitchAddonAPI()
+
+	print_state(4, "Resolving dependencies...")
+	mod_files = Sdict()
+
 	ok = True
-	print("Checking mod name...", end=' ')
-	try: print(cf.project(cargs.name)['name'])
-	except Exception: sys.stdout.flush(); exit("mod not found")
-	print("Resolving dependencies...")
-	to_install = {cargs.name} | cf.resolve_deps(cargs.name)
-	print("Mods to install:", S(' ').join(sorted(to_install)).wrap(72, loff=17))
-	print("Checking versions...")
-	file_ids = dict()
-	ok = True
-	for i in to_install:
-		versions = cf.project_versions(i)
-		if (mc_version not in versions): print(f"Mod {i} does not support Minecraft {mc_version}."); ok = False; continue
-		try: file_ids[i] = cf.project_newest_file_id(i, versions[mc_version], min_type=('A' if (cargs.alpha) else 'B' if (cargs.beta) else 'R'))
-		except Exception: print(f"Mod {i} doesn't have any{'' if (cargs.alpha) else ' release/beta' if (cargs.beta) else ' release'} versions on the first page."); ok = False
-	if (not ok): exit("Aborting.")
-	print("Downloading mods...")
-	md5s = {i: cf.project_file_id_md5(i, file_ids[i]) for i in file_ids}
-	installed = set()
+	def add_deps(addonIds): # TODO: conflicts, optionals?
+		nonlocal ok
+		if (not addonIds): return
+		files = dict()
+		for i in addonIds:
+			fl = cf.getAddonFiles(i)
+			# TODO:
+			#print(f"Mod {i} doesn't have any{'' if (cargs.alpha) else ' release/beta' if (cargs.beta) else ' release'} versions on the first page."); ok = False
+			try: files[i] = first(j for j in sorted(fl, key=operator.itemgetter('id'), reverse=True) if mcpack.mc_version in j['gameVersion'])
+			except StopIteration: print_state(1, f"\033[1;91mError:\033[0m mod \033[1m'{cf.getAddon(i)['name']}'\033[0m does not support \033[1mMinecraft {mcpack.mc_version}\033[0m."); ok = False; continue
+		mod_files.update(files)
+		add_deps([j['addonId'] for i in files.values() for j in i['dependencies']]) # TODO: 'type'
+
+	add_deps(mcpack.mod_list)
+	if (not ok): print_state(1, "Aborting."); exit(1, nolog=True)
+
+	print_state(5, "Mods to install:")
+	print(S(' ').join(sorted(cf.getAddon(i)['name'] for i in mod_files)).wrap(os.get_terminal_size()[0]), end='\n\n')
+
+	def build_deps(x): return {cf.getAddon(i)['name']: build_deps(S(mod_files[i]['dependencies'])@['addonId']) for i in x}
+
+	print("\033[1m• Dependency tree:")
+	NodesTree(build_deps(mcpack.mod_list)).print(root=False, usenodechars=True, indent=1)
+	print("\033[0m")
+
+	print_state(4, "Downloading mods...")
+
+	for k, v in mod_files.items():
+		name = cf.getAddon(k)['name']
+		print(f"\033[1m• Installing {name}\033[0m")
+		installed = bool()
+		for i in os.listdir():
+			m = re.match(r'(.*)-([\d\.]+)_(\d+)\.\w+', i)
+			if (m is None): continue
+			if (m[1] != name): continue
+			if (m[2] != mcpack.mc_version): continue
+			if (int(m[3]) != v['id']):
+				print(f"Uninstalling {m[1]} version {m[3]}")
+				os.remove(i)
+			else: installed = True
+		if (installed): print_info(3, "already installed"); continue
+		r = requests.get(v['downloadUrl'], stream=True)
+		fn = f"{name}-{mcpack.mc_version}_{v['id']}.{r.url.split('.')[-1]}"
+		f = open(fn, 'wb')
+		for c in progiter(r.iter_content(chunk_size=4096), math.ceil(int(r.headers.get('Content-Length'))/4096)):
+			f.write(c)
+		f.close()
+	print()
+
+	print_state(4, "Verifying installation...")
+
 	for i in os.listdir():
 		m = re.match(r'(.*)-([\d\.]+)_(\d+)\.\w+', i)
 		if (m is None): continue
-		if (m[2] != mc_version):
-			if (input(f"{m[1]} for {m[2]} is probably not compatible with Minecraft {mc_version}. Disable? [Y/n] ").strip().casefold() in 'y'):
+		if (m[2] != mcpack.mc_version):
+			if (input(f"{m[1]} for {m[2]} is probably not compatible with Minecraft {mcpack.mc_version}. Disable? [Y/n] ").strip().casefold() in 'y'):
 				if (not os.path.isdir('Disabled')): os.mkdir('Disabled')
 				shutil.move(i, 'Disabled/'+i)
 				print(f"Disabled {m[1]}.")
 			continue
-		if (m[1] not in to_install): continue
-		if (m[3] != file_ids.get(m[1])):
-			print(f"Uninstalling {m[1]} version {m[3]} (old)")
-			os.remove(i)
-			continue
-		if (hashlib.md5(open(i, 'rb').read()).hexdigest() == md5s[m[1]]): installed.add(m[1])
-	for i in to_install:
-		print(f"Installing {i}", end=' ')
-		if (i in installed): print("...already installed"); continue
-		else: print()
-		r = requests.get(f"{cf.cfbaseurl}/projects/{i}/files/{file_ids[i]}/download", stream=True)
-		fn = f"{i}-{mc_version}_{file_ids[i]}.{r.url.split('.')[-1]}"
-		f = open(fn, 'wb')
-		for c in progiter(r.iter_content(chunk_size=4096), math.ceil(int(r.headers.get('Content-Length'))/4096)): f.write(c)
-		f.close()
-		md5 = hashlib.md5(open(fn, 'rb').read()).hexdigest()
-		if (md5 != md5s[i]):
-			print(f"Error downloading {i}: md5 does not match ({md5} vs orig {md5s[i]}). Restart installation before playing.")
-			ok = False
-	if (ok): print("Installation successful.")
+	print()
 
+	if (ok): print_state(2, "Update successful.")
+
+@apcmd(metavar='<action>')
+@aparg('version', nargs='?')
 def version(cargs):
-	global mc_version
-	db.load()
-	if (cargs.version is None): print(f"Current Minecraft version is {mc_version}."); return
-	mc_version = cargs.version
-	db.save()
-	print(f"Successfully set Minecraft {mc_version} version.")
+	""" Get/set Minecraft version for this directory. """
 
-def main(f, cargs):
-	try: return f(cargs)
+	mcpack = MCPack.open()
+	if (cargs.version is None): print(f"Current Minecraft version is {mcpack.mc_version}."); return
+
+	mcpack.mc_version = cargs.version
+	mcpack.save()
+	print(f"Successfully set Minecraft {mcpack.mc_version} version.")
+
+@apmain
+def main(cargs):
+	try: return cargs.func(cargs)
 	except Exception as ex: exception(ex)
-	except KeyboardInterrupt as ex: exit(ex)
+	except KeyboardInterrupt as ex: exit(ex, nolog=True)
 
-if (__name__ == '__main__'):
-	subparser = argparser.add_subparsers(metavar='<action>')
+if (__name__ == '__main__'): exit(main(nolog=True), nolog=True)
 
-	args_install = subparser.add_parser('install', help="Download a mod with all its dependencies.")
-	args_install.add_argument('name')
-	args_install.add_argument('--beta', action='store_true', help="Allow beta versions")
-	args_install.add_argument('--alpha', action='store_true', help="Allow alpha and beta versions")
-	args_install.set_defaults(func=install)
-
-	args_version = subparser.add_parser('version', help="Get/set Minecraft version for this directory.")
-	args_version.add_argument('version', nargs='?')
-	args_version.set_defaults(func=version)
-
-	argparser.set_defaults(func=lambda *args: sys.exit(argparser.print_help()))
-	cargs = argparser.parse_args()
-	logstarted(); exit(main(cargs.func, cargs))
-else: logimported()
-
-# by Sdore, 2019
+# by Sdore, 2020

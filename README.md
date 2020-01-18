@@ -3,7 +3,7 @@ Minecraft mod (packet) manager working with [Curseforge](https://minecraft.curse
 
 ## Features
 - Resolves dependencies.
-- Looks for and tries to resolve conflicts.
+- Looks for and tries to resolve conflicts [WiP].
 
 # Dependencies
 * `utils`: https://github.com/egormanga/utils
