@@ -59,7 +59,7 @@ def add(cargs):
 	l = sorted(res, key=lambda x: (x['slug'] != cargs.name, -x['popularityScore'], x['name']))
 	w = os.get_terminal_size()[0]
 	for ii, i in enumerate(l, 1):
-		s = f"\033[7;33m{ii}\033[0m \033[1m{i['name']}\033[0m \033[2mby {i['authors'][0]['name']}\033[0m "
+		s = f"\033[7;33m{ii}\033[0m \033[1m{i['name']}\033[0m ({i['slug']}) \033[2mby {i['authors'][0]['name']}\033[0m "
 		print(s + f"\033[1;34m({S(', ').join(S(i['categories'])@['name']).wrap(w-1, loff=len(noesc.sub('', s))+1)})\033[0m" + ' \033[1;33;7m[added]\033[0m'*(i['id'] in mcpack.mod_list))
 		print(' '*(len(Sint(ii))+3) + S(i['summary']).wrap(w, loff=len(Sint(ii))+4))
 
@@ -107,7 +107,7 @@ def list(cargs):
 	w = os.get_terminal_size()[0]
 	for ii, i in enumerate(l, 1):
 		i = cf.getAddon(i)
-		s = f"\033[1m• {i['name']}\033[0m \033[2mby {i['authors'][0]['name']}\033[0m "
+		s = f"\033[1m• {i['name']}\033[0m ({i['slug']}) \033[2mby {i['authors'][0]['name']}\033[0m "
 		print(s + f"\033[1;94m({S(', ').join(S(i['categories'])@['name']).wrap(w-1, loff=len(noesc.sub('', s))+1)})\033[0m")
 		print(' '*3 + S(i['summary']).wrap(w, loff=4))
 
