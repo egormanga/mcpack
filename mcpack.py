@@ -77,6 +77,24 @@ def add(cargs):
 	print_state(2, f"Added {decline(nadded, ('new mod', 'new mods'))}.")
 
 @apcmd(metavar='<action>')
+@aparg('name')
+def remove(cargs):
+	""" Remove mod from bundle. """
+
+	mcpack = MCPack.open()
+
+	cf = TwitchAddonAPI()
+
+	for ii, i in enumerate(mcpack.mod_list):
+		if (cf.getAddon(i)['name'] == cargs.name): break
+	else: print_state(1, "No such mod."); return
+
+	del mcpack.mod_list[ii]
+	mcpack.save()
+
+	print_state(2, f"Removed '{cf.getAddon(i)['name']}'.")
+
+@apcmd(metavar='<action>')
 def list(cargs):
 	""" List mods in bundle. """
 
