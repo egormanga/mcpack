@@ -129,7 +129,6 @@ def update(cargs):
 	ok = True
 	def add_deps(addonIds): # TODO: conflicts, optionals?
 		nonlocal ok
-		if (not addonIds): return
 		files = dict()
 		for i in addonIds:
 			fl = cf.getAddonFiles(i)
@@ -137,8 +136,9 @@ def update(cargs):
 			#print(f"Mod {i} doesn't have any{'' if (cargs.alpha) else ' release/beta' if (cargs.beta) else ' release'} versions on the first page."); ok = False
 			try: files[i] = first(j for j in sorted(fl, key=operator.itemgetter('id'), reverse=True) if mcpack.mc_version in j['gameVersion'])
 			except StopIteration: print_state(1, f"\033[1;91mError:\033[0m mod \033[1m'{cf.getAddon(i)['name']}'\033[0m does not support \033[1mMinecraft {mcpack.mc_version}\033[0m."); ok = False; continue
+		if (not files): return
 		mod_files.update(files)
-		add_deps([j['addonId'] for i in files.values() for j in i['dependencies']]) # TODO: 'type'
+		add_deps(j['addonId'] for i in files.values() for j in i['dependencies'] if j['type'] == 3) # TODO: 'type'
 
 	add_deps(mcpack.mod_list)
 	if (not ok): print_state(1, "Aborting."); exit(1, nolog=True)
@@ -146,7 +146,7 @@ def update(cargs):
 	print_state(5, "Mods to install:")
 	print(S(' ').join(sorted(cf.getAddon(i)['slug'] for i in mod_files)).wrap(os.get_terminal_size()[0]), end='\n\n')
 
-	def build_deps(x): return {cf.getAddon(i)['name']: build_deps(S(mod_files[i]['dependencies'])@['addonId']) for i in x}
+	def build_deps(x): return {cf.getAddon(i)['name']: build_deps(j['addonId'] for j in mod_files[i]['dependencies'] if j['type'] == 3) for i in x}
 
 	print("\033[1m• Dependency tree:")
 	NodesTree(build_deps(mcpack.mod_list)).print(root=False, usenodechars=True, indent=1)
