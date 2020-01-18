@@ -86,13 +86,14 @@ def remove(cargs):
 	cf = TwitchAddonAPI()
 
 	for ii, i in enumerate(mcpack.mod_list):
-		if (cf.getAddon(i)['name'] == cargs.name): break
+		i = cf.getAddon(i)
+		if (cargs.name.casefold() in (i['slug'], i['name'].casefold())): break
 	else: print_state(1, "No such mod."); return
 
 	del mcpack.mod_list[ii]
 	mcpack.save()
 
-	print_state(2, f"Removed '{cf.getAddon(i)['name']}'.")
+	print_state(2, f"Removed '{i['name']}'.")
 
 @apcmd(metavar='<action>')
 def list(cargs):
@@ -143,7 +144,7 @@ def update(cargs):
 	if (not ok): print_state(1, "Aborting."); exit(1, nolog=True)
 
 	print_state(5, "Mods to install:")
-	print(S(' ').join(sorted(cf.getAddon(i)['name'] for i in mod_files)).wrap(os.get_terminal_size()[0]), end='\n\n')
+	print(S(' ').join(sorted(cf.getAddon(i)['slug'] for i in mod_files)).wrap(os.get_terminal_size()[0]), end='\n\n')
 
 	def build_deps(x): return {cf.getAddon(i)['name']: build_deps(S(mod_files[i]['dependencies'])@['addonId']) for i in x}
 
