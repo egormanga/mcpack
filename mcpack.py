@@ -20,6 +20,9 @@ class TwitchAddonAPI:
 	def getAddon(self, addonId):
 		return self.api_get(f"/{addonId}")
 
+	def getAddonBySlug(self, slug):
+		return first(self.search(slug)@{'slug': (slug,)})
+
 	def getAddonFiles(self, addonId):
 		return self.api_get(f"/{addonId}/files")
 
@@ -202,6 +205,44 @@ def version(cargs):
 	mcpack.mc_version = cargs.version
 	mcpack.save()
 	print(f"Successfully set Minecraft {mcpack.mc_version} version.")
+
+@apcmd(metavar='<action>')
+@aparg('file', type=argparse.FileType('r'))
+def import_(cargs):
+	""" Import modlist from exported file. """
+
+	cf = TwitchAddonAPI()
+
+	data = yaml.safe_load(cargs.file)
+
+	mcpack = MCPack.open()
+
+	print("Importing mods")
+
+	if ('mc_version' in data): mcpack.mc_version = data['mc_version']
+	mcpack.mod_list += [id for id in (cf.getAddonBySlug(i)['id'] for i in progiter(data['mod_list'])) if id not in mcpack.mod_list]
+
+	mcpack.save()
+	print("Import successful.")
+
+@apcmd(metavar='<action>')
+@aparg('file', type=argparse.FileType('w'))
+def export(cargs):
+	""" Export modlist to file. """
+
+	cf = TwitchAddonAPI()
+
+	data = dict()
+
+	mcpack = MCPack.open()
+
+	print("Exporting mods")
+
+	if (mcpack.mc_version is not None): data['mc_version'] = mcpack.mc_version
+	data['mod_list'] = [cf.getAddon(i)['slug'] for i in progiter(mcpack.mod_list)]
+
+	yaml.safe_dump(data, cargs.file)
+	print("Export successful.")
 
 @apmain
 def main(cargs):
