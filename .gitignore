@@ -1,6 +1,6 @@
-**.db
-**.log
-**.old
-**.bak
-**__pycache__
-**_config.py
+config.py
+*.db
+*.log
+*.old
+*.bak
+__pycache__
