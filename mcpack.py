@@ -53,7 +53,9 @@ class MCPack(Slots):
 
 	def save(self, file=None):
 		if (file is None): file = self.default_filename
-		json.dump({i: getattr(self, i) for i in self.__slots__}, open(file, 'w') if (isinstance(file, str)) else file)
+		if (isinstance(file, str)): file = open(file, 'w')
+		json.dump({i: getattr(self, i) for i in self.__slots__}, file, indent=2)
+		file.write('\n')
 
 def file_versions(file: dict): return tuple(v for i in file.get('sortableGameVersions', ()) if (v := i['gameVersion']) and v[0].isdigit())
 
@@ -98,9 +100,12 @@ def remove(cargs):
 
 	cf = CurseForgeAPI()
 
-	try: a = first(i for i in cf.search(cargs.name) if i['id'] in mcpack.mod_list and (cargs.name.strip() == i['slug'] or cargs.name.strip().casefold() == i['name'].strip().casefold()))
-	except StopIteration: print_state(1, "No such mod."); return
-	else: ii = mcpack.mod_list.index(a['id'])
+	l = mcpack.mod_list
+	w = os.get_terminal_size()[0]
+	for ii, i in enumerate(l):
+		a = cf.getAddon(i)
+		if (cargs.name.strip() == a['slug'] or cargs.name.strip().casefold() == a['name'].strip().casefold()): break
+	else: print_state(1, "No such mod."); return
 
 	fl = cf.getAddonFiles(a['id'], gameVersion=mcpack.mc_version)
 	try: f = first(f for f in sorted(fl, key=operator.itemgetter('id'), reverse=True) if f['downloadUrl'] is not None)
@@ -215,10 +220,9 @@ def update(cargs):
 		fn = f"{name}-{mcpack.mc_version if (mcpack.mc_version in vers) else max(vers, key=version.parse)}_{v['id']}.{r.url.split('.')[-1]}"
 		fns.add(fn)
 
-		f = open(fn, 'wb')
-		for c in progiter(r.iter_content(chunk_size=4096), math.ceil(int(r.headers.get('Content-Length'))/4096)):
-			f.write(c)
-		f.close()
+		with open(fn, 'wb') as f:
+			for c in progiter(r.iter_content(chunk_size=4096), math.ceil(int(r.headers.get('Content-Length'))/4096)):
+				f.write(c)
 	print()
 
 	print_state(4, "Verifying installation...")
