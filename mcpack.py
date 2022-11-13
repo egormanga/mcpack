@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 # MCPack
 
+import yaml, requests
 from packaging import version
 from utils.nolog import *
 from .config import API_KEY
