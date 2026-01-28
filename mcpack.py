@@ -1,44 +1,75 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # MCPack
 
 import yaml, requests
+from concurrent.futures import ThreadPoolExecutor
 from packaging import version
 from utils.nolog import *
 from .config import API_KEY
 
-def print_state(c, t): print(f"\033[1;9{c}m==>\033[0m \033[1m{t}\033[0m")
-def print_info(c, t): print(f"   \033[1;9{c}m>\033[0m \033[1m{t}\033[0m")
+def print_state(c, t): print(f"\033[1;9{c}m==>\033[m \033[1m{t}\033[22m")
+def print_info(c, t): print(f"   \033[1;9{c}m>\033[m {t}")
 
 class CurseForgeAPI:
+	class Game:
+		MINECRAFT = 432
+
+	class Class:
+		MOD = 6
+		SHADER = 6552
+
 	api_base_url = "https://api.curseforge.com/v1"
 	api_headers = {'User-Agent': None, 'X-API-Key': API_KEY}
 
 	@classmethod
-	@lrucachedfunction
+	@cachedfunction
 	def api_get(cls, path, **kwargs):
 		r = requests.get(f"{cls.api_base_url}/{path.lstrip('/')}", headers=cls.api_headers, params=kwargs)
 		if (not r.ok): r.raise_for_status()
 		return S(r.json()['data'])
 
-	def search(self, name, gameId=432, classId=6, sortField=2, sortOrder='desc', **kwargs):
-		return self.api_get('/mods/search', gameId=gameId, classId=classId, searchFilter=name, sortField=sortField, sortOrder=sortOrder, **kwargs)
+	@classmethod
+	def api_paginate(cls, *args, _paginate=True, **kwargs):
+		if (not _paginate): return cls.api_get(*args, **kwargs)
+
+		ii = int()
+		while (True):
+			r = cls.api_get(*args, **kwargs, index=ii)
+			if (not r): break
+			yield from r
+			ii += len(r)
+
+	def search(self, name, *, gameId=Game.MINECRAFT, classId=Class.MOD, sortField=2, sortOrder='desc', **kwargs):
+		return self.api_paginate('/mods/search',
+			gameId=gameId,
+			classId=classId,
+			searchFilter=name,
+			sortField=sortField,
+			sortOrder=sortOrder,
+			**kwargs
+		)
 
 	def getAddon(self, addonId):
 		return self.api_get(f"/mods/{addonId}")
 
 	def getAddonBySlug(self, slug):
-		return first(i for i in self.search(slug) if i['slug'] == slug)
+		return only(i for i in self.search(slug, _paginate=False) if i['slug'] == slug)
 
 	def getAddonFiles(self, addonId, gameVersion=None, **kwargs):
 		if (gameVersion is not None): parseargs(kwargs, gameVersion=gameVersion)
-		return self.api_get(f"/mods/{addonId}/files", **kwargs)
+		return self.api_paginate(f"/mods/{addonId}/files", **kwargs)
 
 	def getAddonFileInfo(self, addonId, fileId):
-		return self.api_get(f"/mods/{addonId}/file/{fileId}")
+		return self.api_get(f"/mods/{addonId}/files/{fileId}")
+
+	def getAddonFileDownloadUrl(self, addonId, fileId):
+		return self.api_get(f"/mods/{addonId}/files/{fileId}/download-url")
 
 class MCPack(Slots):
-	mc_version: None
-	mod_list: list
+	mc_version: str | None
+	loaders: tuple[str] | None
+	mod_list: list[int]
+	skip_version: list[str]
 	default_filename = 'mcpack.json'
 
 	@classmethod
@@ -55,13 +86,20 @@ class MCPack(Slots):
 	def save(self, file=None):
 		if (file is None): file = self.default_filename
 		if (isinstance(file, str)): file = open(file, 'w')
-		json.dump({i: getattr(self, i) for i in self.__slots__}, file, indent=2)
-		file.write('\n')
+		file.write(json.dumps({i: getattr(self, i) for i in self.__slots__}, indent=2) + '\n')
 
-def file_versions(file: dict): return tuple(v for i in file.get('sortableGameVersions', ()) if (v := i['gameVersion']) and v[0].isdigit())
+	@staticmethod
+	def file_versions(file: dict):
+		return {k: frozenset(map(operator.itemgetter(1), v)) for k, v in groupby(((i['gameVersionTypeId'], (i['gameVersion'] or i['gameVersionName'])) for i in file.get('sortableGameVersions', ())), key=operator.itemgetter(0))}
+
+	def version_filename(self, file):
+		vers = {j for i in self.file_versions(file).values() for j in i if j[0].isdigit()}
+		loaders = sorted(j for i in self.file_versions(file).values() for j in i if not j[0].isdigit())
+		return f"{self.mc_version if (self.mc_version in vers) else max(vers, key=version.parse)}-{'_'.join(loaders)}_{file['id']}.{file['fileName'].rpartition('.')[2]}"
 
 @apcmd(metavar='<action>')
-@aparg('name')
+@aparg('-t', '--type', choices=tuple(i.lower() for i in dir(CurseForgeAPI.Class) if not i.startswith('_')), default='mod')
+@aparg('name', metavar='<name>', nargs='A...')
 def add(cargs):
 	""" Add a mod to the bundle. """
 
@@ -69,19 +107,23 @@ def add(cargs):
 
 	cf = CurseForgeAPI()
 
-	res = cf.search(cargs.name)
-	l = res #sorted(res, key=lambda x: (x['slug'] != cargs.name, -x['popularityScore'], x['name']))
-	w = os.get_terminal_size()[0]
-	for ii, i in enumerate(l, 1):
-		s = f"\033[7;33m{ii}\033[0m \033[1m{i['name'].strip()}\033[0m (\033]8;;{i['links']['websiteUrl']}\033\\{i['slug']}\033]8;;\033\\) \033[2mby {i['authors'][0]['name']}\033[0m \033[1;92m{max((v for f in i['latestFiles'] for v in file_versions(f)), key=version.parse, default='?')}\033[0m \033[1;7;93m({int(i['downloadCount'])})\033[0m "
-		print(s + f"\033[1;34m({S(', ').join(S(i['categories'])@['name']).wrap(w-1, loff=len(noesc.sub('', s))+1)})\033[0m" + ' \033[1;33;7m[added]\033[0m'*(i['id'] in mcpack.mod_list))
-		print(' '*(len(Sint(ii))+3) + S(i['summary']).wrap(w, loff=len(Sint(ii))+4))
+	name = ' '.join(cargs.name).strip()
+	res = cf.search(name, classId=getattr(CurseForgeAPI.Class, cargs.type.upper()))
+	l = sorted(res, key=lambda x: (not x['slug'].startswith(name), x['isFeatured'], -x['downloadCount'], x['name']))
+	width = os.get_terminal_size()[0]
+	for ii, mod in enumerate(l, 1):
+		vers = set(map(operator.itemgetter('gameVersion'), mod['latestFilesIndexes']))
+		s = f"\033[7;33m{ii}\033[m \033[1m{mod['name'].strip()}\033[22m (\033[96m{terminal_link(mod['links']['websiteUrl'], mod['slug'])}\033[39m) \033[2mby {mod['authors'][0]['name']}\033[22m \033[1;{92 if (mcpack.mc_version in vers) else 91 if (vers) else 2}m{f'{min(vers, key=version.parse)}–{max(vers, key=version.parse)}' if (vers) else '?'}\033[m \033[1;7;93m({mod['downloadCount']})\033[m "
+		s2 = S(f"\033[1;34m({S(', ').join(S(mod['categories'])@['name'])})\033[m" + ' \033[1;33;7m[added]\033[m'*(mod['id'] in mcpack.mod_list))
+		loff = len(noesc.sub('', s))
+		print(s + (s2.wrap(width-1, loff=loff+1) if (loff < width-10) else '\n'+s2.rjust(width)))
+		print(' '*(len(Sint(ii))+3) + S(mod['summary']).wrap(width, loff=len(Sint(ii))+4))
 		print()
 
 	s = "Select mods to add (e.g. 1 2 3-5)"
 	print_state(3, s)
 	print_state(3, '-'*len(s))
-	q = input('\1\033[1;93m\2==>\1\033[0m\2 ')
+	q = input('\1\033[1;93m\2==>\1\033[m\2 ')
 	sel = [j for i in re.findall(r'(\d+)(?:-(\d+))?', q) for j in (range(int(i[0]), int(i[1])+1) if (i[1]) else (int(i[0]),))]
 	mods = [l[i-1]['id'] for i in sel]
 
@@ -108,17 +150,12 @@ def remove(cargs):
 		if (cargs.name.strip() == a['slug'] or cargs.name.strip().casefold() == a['name'].strip().casefold()): break
 	else: print_state(1, "No such mod."); return
 
-	fl = cf.getAddonFiles(a['id'], gameVersion=mcpack.mc_version)
-	try: f = first(f for f in sorted(fl, key=operator.itemgetter('id'), reverse=True) if f['downloadUrl'] is not None)
-	except StopIteration: pass
-	else:
-		name = a['name'].strip()
-		r = requests.get(f['downloadUrl'], stream=True)
-		vers = file_versions(f['latestFiles'][0])
-		fn = f"{name}-{mcpack.mc_version if (mcpack.mc_version in vers) else max(vers, key=version.parse)}_{f['id']}.{r.url.split('.')[-1]}"
+	for f in cf.getAddonFiles(a['id'], gameVersion=mcpack.mc_version):
+		#fn = f"{a['name'].strip()}-{version_filename(f['latestFiles'][0])}"
+		fn = f['fileName']
 		if (os.path.exists(fn)):
-			if (not os.path.isdir('Removed')): os.mkdir('Removed')
-			shutil.move(fn, os.path.join('Removed', fn))
+			if (not os.path.isdir(dirname := 'Removed')): os.mkdir(dirname)
+			shutil.move(fn, os.path.join(dirname, fn))
 
 	del mcpack.mod_list[ii]
 	mcpack.save()
@@ -133,19 +170,32 @@ def list(cargs):
 
 	cf = CurseForgeAPI()
 
-	l = mcpack.mod_list
-	w = os.get_terminal_size()[0]
-	for ii, i in enumerate(l, 1):
-		i = cf.getAddon(i)
-		s = f"\033[1m• {i['name'].strip()}\033[0m (\033]8;;{i['links']['websiteUrl']}\033\\{i['slug']}\033]8;;\033\\) \033[2mby {i['authors'][0]['name']}\033[0m "
-		print(s + f"\033[1;94m({S(', ').join(S(i['categories'])@['name']).wrap(w-1, loff=len(noesc.sub('', s))+1)})\033[0m")
-		print(' '*3 + S(i['summary']).wrap(w, loff=4))
+	with ThreadedProgressPool(1, fixed=True, add_speed_eta=True) as pp:
+		pp.p[0].mv = len(mcpack.mod_list)
+
+		def load(id_):
+			try: return cf.getAddon(id_)
+			finally: pp.cvs[0] += 1
+
+		with ThreadPoolExecutor() as pool:
+			mods = pool.map(load, mcpack.mod_list)
+
+	try: w = os.get_terminal_size()[0]
+	except OSError: w = 132
+	for ii, mod in enumerate(mods, 1):
+		vers = set(map(operator.itemgetter('gameVersion'), mod['latestFilesIndexes']))
+		loaders = {j for f in mod['latestFiles'] for v in mcpack.file_versions(f).values() for j in v if not j[0].isdigit()}
+		s = f"\033[1m• {mod['name'].strip()}\033[22m (\033[96m{terminal_link(mod['links']['websiteUrl'], mod['slug'])}\033[39m) \033[2mby {mod['authors'][0]['name']}\033[22m \033[1;{92 if (mcpack.mc_version in vers) else 91 if (vers) else 2}m{f'{min(vers, key=version.parse)}–{max(vers, key=version.parse)}' if (vers) else '?'}\033[m \033[2;{92 if (set(mcpack.loaders) & loaders) else 91}m{' '.join((f'\033[1;4m{j}\033[22;24;2m' if (j in mcpack.loaders) else j) for j in sorted(loaders))}\033[m "
+		print(s + f"\033[1;94m({S(', ').join(S(mod['categories'])@['name']).wrap(w-1, loff=len(noesc.sub('', s))+1)})\033[m")
+		print(' '*3 + S(mod['summary']).wrap(w, loff=4))
 		print()
 
 @apcmd(metavar='<action>')
+@aparg('--client', action='store_true', help="Client only")
+@aparg('--server', action='store_true', help="Server only")
 #@aparg('--beta', action='store_true', help="Allow beta versions")
 #@aparg('--alpha', action='store_true', help="Allow alpha and beta versions")
-@aparg('--skip-version', action='store_true', help="Skip Minecraft version check")
+@aparg('--skip-version', help="Mods to skip Minecraft version check")
 def update(cargs):
 	""" Download/update all mods in the bundle along with their dependencies. """
 
@@ -158,72 +208,94 @@ def update(cargs):
 	print_state(4, "Resolving dependencies...")
 	mod_files = Sdict()
 
-	ok = True
-	def add_deps(addonIds): # TODO: conflicts, optionals?
-		nonlocal ok
-		files = dict()
+	skip_version = (set(mcpack.skip_version) | set(map(str.strip, (cargs.skip_version or '').split(','))))
 
-		for i in addonIds:
-			fl = cf.getAddonFiles(i, gameVersion=mcpack.mc_version)
+	with ThreadPoolExecutor() as pool:
+		def add_dep(id_): # TODO: conflicts, optionals?
 			# TODO:
-			#print(f"Mod {i} doesn't have any{'' if (cargs.alpha) else ' release/beta' if (cargs.beta) else ' release'} versions on the first page."); ok = False
-			try: files[i] = first(f for f in sorted(fl, key=operator.itemgetter('id'), reverse=True) if f['downloadUrl'] is not None)
+			#print(f"Mod {id_} doesn't have any{'' if (cargs.alpha) else ' release/beta' if (cargs.beta) else ' release'} versions on the first page."); ok = False
+			try: f = mod_files[id_] = first(f for f in sorted(cf.getAddonFiles(id_, gameVersion=mcpack.mc_version), key=operator.itemgetter('id'), reverse=True)
+			                                  if (mcpack.loaders is None or any(l in f['gameVersions'] for l in mcpack.loaders))
+			                                     and (not cargs.client or 'Client' not in f['gameVersions'] or 'Server' not in f['gameVersions'])
+			                                     and (not cargs.server or 'Server' not in f['gameVersions'] or 'Client' not in f['gameVersions']))
 			except StopIteration:
-				m = f"mod \033[1m'{cf.getAddon(i)['name'].strip()}'\033[0m does not support \033[1mMinecraft {mcpack.mc_version}\033[0m."
-				if (not cargs.skip_version): print_state(1, f"\033[1;91mError:\033[0m {m}"); ok = False; continue
+				mod = cf.getAddon(id_)
+				m = f"mod \033[1m{mod['name'].strip()!r}\033[22m (\033[96m{terminal_link(mod['links']['websiteUrl'], mod['slug'])}\033[39m) does not support \033[1mMinecraft {mcpack.mc_version}\033[22m"
+				if (mod['slug'] not in skip_version): print_state(1, f"\033[1;91mError:\033[m {m}."); return False
 				else:
-					print_state(3, f"\033[1;93mWarning:\033[0m {m}")
-					fl = cf.getAddonFiles(i)
-					files[i] = first(f for f in sorted(fl, key=lambda x: (max(file_versions(x), key=version.parse), x['id']), reverse=True) if any(version.parse(k) <= version.parse(mcpack.mc_version) for k in file_versions(f)) and f['downloadUrl'] is not None)
-					print_state(3, f"\033[0m(installing for {max(file_versions(files[i]), key=version.parse)}) [--skip-version]")
+					f = mod_files[id_] = first(f for f in sorted(cf.getAddonFiles(id_), key=lambda x: (max((j for v in mcpack.file_versions(x).values() for j in v if j[0].isdigit()), key=version.parse), x['id']), reverse=True)
+					                             if any(version.parse(j) <= version.parse(mcpack.mc_version) for v in mcpack.file_versions(f).values() for j in v if j[0].isdigit()))
+					print_state(3, f"\033[1;93mWarning:\033[m {m}")
+					print_info(3, f"installing it for \033[1m{max((j for v in mcpack.file_versions(f).values() for j in v if j[0].isdigit()), key=version.parse)}\033[22m [\033[3;96m--skip-version\033[23;39m]")
 
-		if (not files): return
-		mod_files.update(files)
-		add_deps(j['modId'] for i in files.values() for j in i['dependencies'])
+			for i in f['dependencies']:
+				if (i['relationType'] in (0, 3)):  # https://docs.curseforge.com/rest-api/#tocS_FileDependency
+					pool.submit(add_dep, i['modId'])
 
-	add_deps(mcpack.mod_list)
+			return True
+
+		ok = all(pool.map(add_dep, mcpack.mod_list))
 	if (not ok): print_state(1, "Aborting."); exit(1, nolog=True)
 
 	print_state(5, "Mods to install:")
 	print(S('  ').join(sorted(cf.getAddon(i)['slug'] for i in mod_files)).wrap(os.get_terminal_size()[0]), end='\n\n')
 
 	print("\033[1m• Dependency tree:")
-	def build_deps(x): return {cf.getAddon(i)['name'].strip(): build_deps(j['modId'] for j in mod_files[i]['dependencies']) for i in x}
+	def build_deps(x): return {cf.getAddon(i)['name'].strip(): build_deps(j['modId'] for j in mod_files.get(i, {}).get('dependencies', ()) if j['relationType'] in (0, 3)) for i in x}
 	NodesTree(build_deps(mcpack.mod_list)).print(root=False, usenodechars=True, indent=1)
-	print("\033[0m")
+	print("\033[m")
 
 	print_state(4, "Downloading mods...")
 
 	fns = set()
 
 	for k, v in mod_files.items():
-		name = cf.getAddon(k)['name'].strip()
-		print(f"\033[1m• Installing {name}\033[0m")
+		mod = cf.getAddon(k)
+		print(f"\033[1m• Installing {mod['name'].strip()}\033[22m")
 		installed = bool()
 
-		for i in os.listdir():
-			if (os.path.exists('Disabled/') and i in os.listdir('Disabled')):
-				print_info(3, "mod is disabled \033[2m(in Disabled/)\033[0m")
-				continue
-			m = re.match(r'(.*)-([\d\.]+)_(\d+)\.\w+', i)
-			if (m is None): continue
-			if (m[1] != name): continue
-			if (m[2] != mcpack.mc_version): continue
-			if (int(m[3]) != v['id']):
-				print(f"Uninstalling {m[1]} version {m[3]}")
-				os.remove(i)
-			else: installed = True
+		#fn = f"{name}-{mcpack.version_filename(v)}"
+		fn = v['fileName']
 
-		if (installed): print_info(3, "already installed"); continue
+		if (os.path.exists('Disabled/') and fn in os.listdir('Disabled')):
+			print_info(3, "mod is disabled \033[2m(in Disabled/)\033[22m")
+			continue
 
-		r = requests.get(v['downloadUrl'], stream=True)
-		vers = file_versions(v)
-		fn = f"{name}-{mcpack.mc_version if (mcpack.mc_version in vers) else max(vers, key=version.parse)}_{v['id']}.{r.url.split('.')[-1]}"
-		fns.add(fn)
+		## TODO FIXME:
+		#for i in os.listdir():
+		#	m = re.match(r'(.*)-([\d\.]+)_(\d+)\.\w+', i)
+		#	if (m is None): continue
+		#	if (m[1] != name): continue
+		#	if (m[2] != mcpack.mc_version): continue
+		#	if (int(m[3]) != v['id']):
+		#		print(f"Uninstalling {m[1]} version {m[3]}")
+		#		os.remove(i)
+		#	else: installed = True
+		##
+
+		try:
+			with open(fn, 'rb') as f:
+				data = f.read()
+				for i in v['hashes']:
+					match i['algo']:
+						case 1: assert (hashlib.sha1(data).hexdigest() == i['value']); break
+						case 2: assert (hashlib.md5(data).hexdigest() == i['value']); break
+				else: raise WTFException(v['hashes'])
+		except Exception: pass
+		else: print_info(3, "already installed"); continue
+
+		url = v['downloadUrl']
+		if (not url):
+			try: url = cf.getAddonFileDownloadUrl(k, v['id'])
+			except requests.HTTPError: print_info(1, f"download manually: https://curseforge.com/minecraft/mc-mods/{mod['slug']}/download/{v['id']}"); exit(1)
 
 		with open(fn, 'wb') as f:
-			for c in progiter(r.iter_content(chunk_size=4096), math.ceil(int(r.headers.get('Content-Length'))/4096)):
-				f.write(c)
+			try:
+				with requests.get(url, stream=True) as r:
+					for c in progiter(r.iter_content(chunk_size=4096), math.ceil(int(r.headers.get('Content-Length'))/4096)):
+						f.write(c)
+			except: os.remove(fn); raise
+		fns.add(fn)
 	print()
 
 	print_state(4, "Verifying installation...")
@@ -249,6 +321,7 @@ def update(cargs):
 @apcmd(metavar='<action>')
 #@aparg('--beta', action='store_true', help="Allow beta versions")
 #@aparg('--alpha', action='store_true', help="Allow alpha and beta versions")
+@aparg('--skip-version', help="Mods to skip Minecraft version check")
 def commonver(cargs):
 	""" Compute common list of Minecraft versions supported by all mods in the pack. """
 
@@ -257,26 +330,28 @@ def commonver(cargs):
 
 	print_state(4, "Resolving dependencies...")
 
-	versions = None
+	skip_version = (set(mcpack.skip_version) | set(map(str.strip, (cargs.skip_version or '').split(','))))
 
+	versions = dict()
 	def add_deps(addonIds): # TODO: conflicts, optionals?
 		nonlocal versions
 		files = dict()
 		for i in addonIds:
+			mod = cf.getAddon(i)
+			if (mod['slug'] in skip_version): continue
 			fl = cf.getAddonFiles(i)
 			# TODO:
-			#print(f"Mod {i} doesn't have any{'' if (cargs.alpha) else ' release/beta' if (cargs.beta) else ' release'} versions on the first page."); ok = False
-			s = {k for j in fl for k in file_versions(j)}
-			if (versions is None): versions = s
-			else: versions &= s
+			#print(f"Mod {i} doesn't have any{'' if (cargs.alpha) else ' release/beta' if (cargs.beta) else ' release'} versions on the first page.")
+			versions[i] = {(j, *sorted(l for l in i if not l[0].isdigit())) for f in fl for i in itertools.product(*map(operator.itemgetter(1), sorted((k, v) for k, v in mcpack.file_versions(f).items() if k != 75208))) for j in i if j[0].isdigit()}
 		if (not files): return
-		add_deps(j['modId'] for i in files.values() for j in i['dependencies'])
-
+		add_deps(j['modId'] for i in files.values() for j in i['dependencies'] if j['relationType'] in (0, 3))
 	add_deps(mcpack.mod_list)
 
 	print_state(5, "Common Minecraft versions:")
-	print('  '.join(sorted(versions, key=version.parse)))
-	print("\033[0m")
+	common = sorted(set.intersection(*versions.values()), key=lambda x: map(version.parse, x))
+	if (common): print('  '.join(' '.join(i) for i in common))
+	else: print('  '.join(sorted(set.intersection(*({j for i in v for j in i if j[0].isdigit()} for v in versions.values())), key=version.parse)))
+	print("\033[m")
 
 @apcmd(metavar='<action>')
 @aparg('version', nargs='?')
@@ -289,6 +364,18 @@ def version_(cargs):
 	mcpack.mc_version = cargs.version
 	mcpack.save()
 	print(f"Successfully set Minecraft {mcpack.mc_version} version.")
+
+@apcmd(metavar='<action>')
+@aparg('loader', nargs='*')
+def loaders(cargs):
+	""" Get/set mod loaders for this directory. """
+
+	mcpack = MCPack.open()
+	if (not cargs.loader): print(f"Current loaders: {', '.join(sorted(mcpack.loaders or ('none',)))}."); return
+
+	mcpack.loaders = tuple(cargs.loader)
+	mcpack.save()
+	print(f"Successfully set mod loaders.")
 
 @apcmd(metavar='<action>')
 @aparg('file', type=argparse.FileType('r'))
@@ -336,5 +423,5 @@ def main(cargs):
 
 if (__name__ == '__main__'): exit(main(nolog=True), nolog=True)
 
-# by Sdore, 2020-22
+# by Sdore, 2020-26
 #   www.sdore.me

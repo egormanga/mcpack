@@ -1,1 +1,2 @@
-mcpack.py
+from .mcpack import exit, main
+exit(main())
